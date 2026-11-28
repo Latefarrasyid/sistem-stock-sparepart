@@ -14,9 +14,31 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+
+import base64
+
+
+def md(html_str: str):
+    """Render HTML tanpa indentasi/baris kosong agar tidak dianggap code block oleh Markdown."""
+    st.markdown(" ".join(l.strip() for l in html_str.strip().splitlines()), unsafe_allow_html=True)
+
+
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+LOGO_B64 = ""
+if os.path.exists(LOGO_PATH):
+    with open(LOGO_PATH, "rb") as _f:
+        LOGO_B64 = base64.b64encode(_f.read()).decode()
+LOGO_IMG = (f'<img src="data:image/png;base64,{LOGO_B64}" class="logo-img">' if LOGO_B64 else "📦")
+
+try:
+    from PIL import Image
+    _ICON = Image.open(LOGO_PATH) if os.path.exists(LOGO_PATH) else "📦"
+except Exception:
+    _ICON = "📦"
+
 st.set_page_config(
     page_title="Sistem Stock Sparepart",
-    page_icon="📦",
+    page_icon=_ICON,
     layout="wide",
     initial_sidebar_state="auto",
 )
@@ -44,8 +66,9 @@ KRITIS_MAX = 2
 NUM_COLS = ["STOCK AWAL", "KELUAR", "MASUK", "PRICELIST", "NOMINAL TOTAL", "STOCK AKHIR"]
 
 # Palet warna ala SB Admin 2
-C_PRIMARY, C_SUCCESS, C_INFO, C_WARNING, C_DANGER = "#4e73df", "#1cc88a", "#36b9cc", "#f6c23e", "#e74a3b"
-PALETTE = [C_PRIMARY, C_SUCCESS, C_INFO, C_WARNING, C_DANGER, "#858796", "#6f42c1", "#fd7e14", "#20c9a6", "#e83e8c"]
+C_PRIMARY, C_SUCCESS, C_INFO, C_WARNING, C_DANGER = "#D2793A", "#4FA37A", "#3C9DB0", "#E3B04B", "#D1584A"
+C_DARK = "#B35B24"
+PALETTE = [C_PRIMARY, "#3C9DB0", "#4FA37A", "#E3B04B", "#8C6BB1", "#D1584A", "#7A8B99", "#B35B24", "#6FB7A5", "#C98BA5"]
 
 
 def is_valid_gas_url(url: str) -> bool:
@@ -76,21 +99,33 @@ def num(x) -> str:
 CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
-html, body, [class*="css"], .stApp {{ font-family: 'Nunito', sans-serif; }}
-.stApp {{ background: #f8f9fc; }}
+html, body, .stApp, .stApp p, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp h4,
+.stApp button, .stApp input, .stApp textarea, .stApp li, .stApp td, .stApp th, .stApp a,
+.topbar, .kpi, .partcard, .panel-title, .sb-brand, .sb-user, .sb-label, .login-wrap
+{{ font-family: 'Nunito', 'Segoe UI', Roboto, Arial, sans-serif; }}
+[data-testid="stIconMaterial"], .material-icons, [class*="material-symbols"]
+{{ font-family: 'Material Symbols Rounded', 'Material Icons' !important; }}
+.logo-img {{ width:46px; height:46px; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,.25); }}
+.login-wrap .logo-img {{ width:84px; height:84px; box-shadow:0 4px 14px rgba(0,0,0,.25); }}
+.stApp [data-testid="stSidebar"] .stRadio p {{ font-family:'Nunito','Segoe UI',sans-serif; }}
+.stFormSubmitButton > button[kind="primary"], .stButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primaryFormSubmit"] {{ background:{C_PRIMARY} !important; border-color:{C_PRIMARY} !important; color:#fff !important; }}
+.stFormSubmitButton > button[kind="primary"]:hover, .stButton > button[kind="primary"]:hover,
+.stFormSubmitButton > button[kind="primaryFormSubmit"]:hover {{ background:{C_DARK} !important; border-color:{C_DARK} !important; }}
+.stApp {{ background: #fbf7f2; }}
 #MainMenu, footer {{ visibility: hidden; }}
 header[data-testid="stHeader"] {{ background: transparent; }}
 .block-container {{ padding: 1rem 1.5rem 3rem 1.5rem; max-width: 1500px; }}
 
 /* ---------- SIDEBAR ---------- */
 section[data-testid="stSidebar"] {{
-  background: linear-gradient(180deg, {C_PRIMARY} 10%, #224abe 100%);
+  background: linear-gradient(180deg, {C_PRIMARY} 10%, {C_DARK} 100%);
   border-right: none;
 }}
 section[data-testid="stSidebar"] * {{ color: #fff; }}
 .sb-brand {{ display:flex; align-items:center; gap:.6rem; padding:.4rem .2rem 1rem;
   border-bottom:1px solid rgba(255,255,255,.2); margin-bottom:1rem; }}
-.sb-brand .ic {{ font-size:1.8rem; transform: rotate(-12deg); }}
+.sb-brand .ic {{ line-height:0; }}
 .sb-brand .tx {{ font-weight:800; font-size:1.05rem; letter-spacing:.05rem; text-transform:uppercase; line-height:1.1; }}
 .sb-brand small {{ display:block; font-weight:600; opacity:.7; font-size:.65rem; letter-spacing:.1rem; }}
 .sb-user {{ background:rgba(255,255,255,.12); border-radius:.6rem; padding:.7rem .8rem;
@@ -121,10 +156,10 @@ section[data-testid="stSidebar"] .stButton > button:hover {{ background:#fff; co
 .topbar {{ background:#fff; border-radius:.75rem; box-shadow:0 .15rem 1.75rem rgba(58,59,69,.12);
   padding:.9rem 1.3rem; margin-bottom:1.3rem; display:flex; justify-content:space-between;
   align-items:center; flex-wrap:wrap; gap:.6rem; }}
-.topbar h1 {{ font-size:1.35rem; font-weight:800; margin:0; color:#5a5c69; }}
+.topbar h1 {{ font-size:1.35rem; font-weight:800; margin:0; color:#4a3b30; }}
 .topbar .crumb {{ font-size:.75rem; color:#858796; }}
-.topbar .chip {{ background:#eaecf4; border-radius:2rem; padding:.35rem .9rem; font-size:.78rem;
-  font-weight:700; color:#5a5c69; margin-left:.4rem; display:inline-block; }}
+.topbar .chip {{ background:#f4e9de; border-radius:2rem; padding:.35rem .9rem; font-size:.78rem;
+  font-weight:700; color:#4a3b30; margin-left:.4rem; display:inline-block; }}
 .topbar .chip.role {{ background:{C_PRIMARY}; color:#fff; }}
 
 /* ---------- KPI CARDS ---------- */
@@ -132,26 +167,26 @@ section[data-testid="stSidebar"] .stButton > button:hover {{ background:#fff; co
 .kpi {{ background:#fff; border-radius:.75rem; padding:1.1rem 1.25rem; border-left:.3rem solid var(--c);
   box-shadow:0 .15rem 1.75rem rgba(58,59,69,.12); display:flex; justify-content:space-between; align-items:center; }}
 .kpi .lb {{ font-size:.7rem; font-weight:800; text-transform:uppercase; color:var(--c); letter-spacing:.05rem; }}
-.kpi .vl {{ font-size:1.45rem; font-weight:800; color:#5a5c69; margin-top:.2rem; word-break:break-word; }}
+.kpi .vl {{ font-size:1.45rem; font-weight:800; color:#4a3b30; margin-top:.2rem; word-break:break-word; }}
 .kpi .ic {{ font-size:2rem; opacity:.25; }}
 
 /* ---------- PANEL ---------- */
 .panel-title {{ font-weight:800; color:{C_PRIMARY}; font-size:1rem; margin:.2rem 0 .4rem; }}
 div[data-testid="stVerticalBlockBorderWrapper"] {{ background:#fff; border-radius:.75rem;
   box-shadow:0 .15rem 1.75rem rgba(58,59,69,.08); border:none; }}
-.partcard {{ background:linear-gradient(135deg,#f0f4ff,#fff); border:1px solid #d9e2ff; border-radius:.75rem;
+.partcard {{ background:linear-gradient(135deg,#fff4ea,#fff); border:1px solid #f3d9c2; border-radius:.75rem;
   padding:1rem 1.2rem; margin:.6rem 0 1rem; }}
 .partcard h3 {{ margin:0 0 .6rem; color:{C_PRIMARY}; font-size:1.1rem; font-weight:800; }}
 .partcard .g {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:.6rem; }}
 .partcard .g div small {{ display:block; color:#858796; font-size:.68rem; font-weight:800; text-transform:uppercase; }}
-.partcard .g div b {{ color:#5a5c69; }}
+.partcard .g div b {{ color:#4a3b30; }}
 .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {{
   border-radius:.5rem; font-weight:700; }}
 .stFormSubmitButton > button[kind="primary"], .stButton > button[kind="primary"] {{
   background:{C_PRIMARY}; border-color:{C_PRIMARY}; }}
 .login-wrap {{ text-align:center; margin:3vh 0 1rem; }}
 .login-wrap .logo {{ font-size:3.2rem; }}
-.login-wrap h2 {{ font-weight:800; color:#5a5c69; margin:.3rem 0; }}
+.login-wrap h2 {{ font-weight:800; color:#4a3b30; margin:.3rem 0; }}
 .login-wrap p {{ color:#858796; }}
 
 @media (max-width: 768px) {{
@@ -166,6 +201,11 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{ background:#fff; border-radiu
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
+components.html("""<script>
+(function(){const d=window.parent.document;
+if(!d.getElementById('nunito-font')){const l=d.createElement('link');l.id='nunito-font';l.rel='stylesheet';
+l.href='https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap';d.head.appendChild(l);}})();
+</script>""", height=0)
 
 
 # =========================================================
@@ -215,14 +255,13 @@ if "logged_in" not in st.session_state:
 
 
 def login_page():
-    st.markdown(
-        """<style>.stApp{background:linear-gradient(135deg,#4e73df 0%,#224abe 100%);}
-        section[data-testid="stSidebar"]{display:none;}
-        .login-wrap h2,.login-wrap p{color:#fff !important;}</style>
-        <div class="login-wrap"><div class="logo">📦</div><h2>Sistem Stock Sparepart</h2>
-        <p>Silakan login untuk melanjutkan</p></div>""",
-        unsafe_allow_html=True,
-    )
+    md(f"""
+        <style>.stApp{{background:linear-gradient(135deg,#F6C9A0 0%,#E58E4E 100%);}}
+        section[data-testid="stSidebar"]{{display:none;}}
+        .login-wrap h2{{color:#4a3b30 !important;}} .login-wrap p{{color:#6b4e38 !important;}}</style>
+        <div class="login-wrap"><div class="logo">{LOGO_IMG}</div><h2>Sistem Stock Sparepart</h2>
+        <p>Silakan login untuk melanjutkan</p></div>
+    """)
     _, mid, _ = st.columns([1, 1.3, 1])
     with mid:
         with st.container(border=True):
@@ -311,7 +350,7 @@ def to_excel(sheets: dict) -> bytes:
             ws = writer.sheets[name[:31]]
             for c in ws[1]:
                 c.font = Font(bold=True, color="FFFFFF")
-                c.fill = PatternFill("solid", fgColor="4E73DF")
+                c.fill = PatternFill("solid", fgColor="D2793A")
                 c.alignment = Alignment(horizontal="center", vertical="center")
             for i, col in enumerate(frame.columns, start=1):
                 width = max([len(str(col))] + [len(str(v)) for v in frame[col].head(300)]) + 3
@@ -354,7 +393,7 @@ def to_pdf(title: str, frame: pd.DataFrame, money_cols=(), int_cols=(), total_ro
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 7),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d3e2")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8f9fc")]),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fbf7f2")]),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
     for i, c in enumerate(frame.columns):
@@ -362,7 +401,7 @@ def to_pdf(title: str, frame: pd.DataFrame, money_cols=(), int_cols=(), total_ro
             style.append(("ALIGN", (i, 0), (i, -1), "RIGHT"))
     if total_row:
         style += [("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-                  ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#eaecf4"))]
+                  ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f4e9de"))]
     tbl.setStyle(TableStyle(style))
     story.append(tbl)
     doc.build(story)
@@ -383,12 +422,11 @@ def export_buttons(label: str, frame: pd.DataFrame, title: str, money_cols=(), i
 # KOMPONEN UI
 # =========================================================
 def topbar(title: str, icon: str):
-    st.markdown(
+    md(
         f"""<div class="topbar"><div><h1>{icon} {title}</h1>
         <div class="crumb">Sistem Stock Sparepart &nbsp;/&nbsp; {title}</div></div>
         <div><span class="chip">📅 {now_wib():%d %b %Y, %H:%M} WIB</span>
         <span class="chip role">👤 {st.session_state.username} · {st.session_state.role.upper()}</span></div></div>""",
-        unsafe_allow_html=True,
     )
 
 
@@ -403,7 +441,7 @@ def kpi_cards(items):
 def style_fig(fig, height=340):
     fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10),
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      font=dict(family="Nunito", color="#5a5c69"),
+                      font=dict(family="Nunito", color="#4a3b30"),
                       legend=dict(orientation="h", y=-0.2))
     return fig
 
@@ -443,11 +481,8 @@ if st.session_state.get("menu") not in pages:
     st.session_state.menu = list(pages.keys())[0]
 
 with st.sidebar:
-    st.markdown(
-        '<div class="sb-brand"><div class="ic">📦</div><div class="tx">Stock Sparepart'
-        '<small>INVENTORY SYSTEM</small></div></div>',
-        unsafe_allow_html=True,
-    )
+    md(f'<div class="sb-brand"><div class="ic">{LOGO_IMG}</div><div class="tx">Stock Sparepart'
+       '<small>INVENTORY SYSTEM</small></div></div>')
     st.markdown(
         f'<div class="sb-user"><div class="av">{st.session_state.username[:1].upper()}</div>'
         f'<div><b>{st.session_state.username}</b><span>{st.session_state.role}</span></div></div>',
@@ -687,14 +722,13 @@ elif page == "trx" and is_admin:
                 row = hit.iloc[0]
                 no_part, nama = str(row["NO.PART"]), str(row.get("SPAREPART", ""))
                 stok = int(row.get("STOCK AKHIR", 0))
-                st.markdown(
+                md(
                     f"""<div class="partcard"><h3>✅ {nama}</h3><div class="g">
                     <div><small>No. Part</small><b>{no_part}</b></div>
                     <div><small>Tipe Mobil</small><b>{row.get('TIPE MOBIL', '-') or '-'}</b></div>
                     <div><small>Kategori</small><b>{row.get('KATEGORI', '-') or '-'}</b></div>
                     <div><small>Pricelist</small><b>{rp(row.get('PRICELIST', 0))}</b></div>
                     <div><small>Stok Akhir</small><b>{num(stok)}</b></div></div></div>""",
-                    unsafe_allow_html=True,
                 )
                 with st.form("form_trx", clear_on_submit=True):
                     qty = st.number_input("QTY", min_value=1, step=1, value=1)
