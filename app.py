@@ -88,8 +88,13 @@ def now_wib() -> datetime:
     return datetime.utcnow() + timedelta(hours=7)
 
 
+MONEY_COLS = ("PRICELIST", "NOMINAL TOTAL", "NOMINAL")
+
+
 def rp(x) -> str:
     try:
+        if pd.isna(x):
+            return "Rp 0"
         return "Rp " + f"{float(x):,.0f}".replace(",", ".")
     except Exception:
         return "Rp 0"
@@ -379,6 +384,11 @@ def to_excel(sheets: dict) -> bytes:
             for i, col in enumerate(frame.columns, start=1):
                 width = max([len(str(col))] + [len(str(v)) for v in frame[col].head(300)]) + 3
                 ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(width, 45)
+            for i, col in enumerate(frame.columns, start=1):
+                if str(col).upper() in MONEY_COLS:
+                    for row in ws.iter_rows(min_row=2, min_col=i, max_col=i):
+                        for c in row:
+                            c.number_format = '"Rp" #,##0'
             ws.freeze_panes = "A2"
     return buf.getvalue()
 
@@ -546,6 +556,15 @@ def kategori_options(df=None) -> list:
     return sorted(opts)
 
 
+def sdf(frame, **kw):
+    """st.dataframe dengan kolom PRICELIST / NOMINAL tampil sebagai Rp 1.234.567 (nilai tetap angka, bisa di-sort)."""
+    cols = {c: rp for c in MONEY_COLS if c in frame.columns}
+    data = frame.style.format(cols) if cols else frame
+    kw.setdefault("hide_index", True)
+    kw.setdefault("use_container_width", True)
+    st.dataframe(data, **kw)
+
+
 def load_stock():
     try:
         return fetch_stock()
@@ -708,7 +727,7 @@ if page == "dash":
         if kr.empty:
             st.success("Semua stok dalam kondisi aman.")
         else:
-            st.dataframe(kr, use_container_width=True, hide_index=True)
+            sdf(kr, use_container_width=True, hide_index=True)
 
 # =========================================================
 # 2. DATA STOK
@@ -742,7 +761,7 @@ elif page == "stok":
             v = v[v["STOCK AKHIR"] <= KRITIS_MAX]
 
         st.caption(f"Menampilkan {len(v):,} dari {len(df):,} item")
-        st.dataframe(v, use_container_width=True, hide_index=True, height=480)
+        sdf(v, use_container_width=True, hide_index=True, height=480)
         tot = {}
         if "NOMINAL TOTAL" in v.columns:
             tot = {"SPAREPART": "TOTAL", "NOMINAL TOTAL": v["NOMINAL TOTAL"].sum()}
@@ -774,7 +793,7 @@ elif page == "kategori":
 
     with st.container(border=True):
         st.markdown('<div class="panel-title">Ringkasan per Kategori</div>', unsafe_allow_html=True)
-        st.dataframe(g, use_container_width=True, hide_index=True)
+        sdf(g, use_container_width=True, hide_index=True)
         total = {"KATEGORI": "TOTAL", "JUMLAH ITEM": g["JUMLAH ITEM"].sum(), "STOCK AWAL": g["STOCK AWAL"].sum(),
                  "MASUK": g["MASUK"].sum(), "KELUAR": g["KELUAR"].sum(), "STOCK AKHIR": g["STOCK AKHIR"].sum(),
                  "NOMINAL TOTAL": g["NOMINAL TOTAL"].sum()}
@@ -789,7 +808,7 @@ elif page == "kategori":
         d = df if pilih == "Semua" else df[df["KATEGORI"] == pilih]
         cols = [c for c in ["KATEGORI", "NO.PART", "SPAREPART", "TIPE MOBIL", "STOCK AKHIR", "PRICELIST", "NOMINAL TOTAL"] if c in d.columns]
         d = d[cols].sort_values(["KATEGORI", "SPAREPART"])
-        st.dataframe(d, use_container_width=True, hide_index=True, height=380)
+        sdf(d, use_container_width=True, hide_index=True, height=380)
         export_buttons(f"Detail_Kategori_{pilih}".replace(" ", "_"), d, f"Detail Stok Kategori: {pilih}",
                        money_cols=("PRICELIST", "NOMINAL TOTAL"), int_cols=("STOCK AKHIR",),
                        total_row={"SPAREPART": "TOTAL", "NOMINAL TOTAL": d["NOMINAL TOTAL"].sum()}, key="katd")
@@ -824,7 +843,7 @@ elif page == "trx" and is_admin:
                 sim = df[keys.str.contains(kode, regex=False)].head(5)
                 if not sim.empty:
                     st.caption("Mungkin maksud Anda:")
-                    st.dataframe(sim[[c for c in ["NO.PART", "SPAREPART", "TIPE MOBIL"] if c in sim.columns]],
+                    sdf(sim[[c for c in ["NO.PART", "SPAREPART", "TIPE MOBIL"] if c in sim.columns]],
                                  hide_index=True, use_container_width=True)
                 st.button("➕ Daftarkan di Master Sparepart", type="primary",
                           on_click=goto, args=("🛠️  Master Sparepart",),
@@ -913,7 +932,7 @@ elif page == "master" and is_admin:
                     st.error("No. Part tidak ditemukan.")
                     sim = df_m[k.str.contains(q, regex=False)].head(5)
                     if not sim.empty:
-                        st.dataframe(sim[["NO.PART", "SPAREPART"]], hide_index=True, use_container_width=True)
+                        sdf(sim[["NO.PART", "SPAREPART"]], hide_index=True, use_container_width=True)
                 elif not q:
                     st.info("Ketik No. Part lalu tekan Enter.")
                 else:
@@ -997,5 +1016,5 @@ elif page == "riwayat":
                 m = h.astype(str).apply(lambda c: c.str.contains(cari, case=False, na=False)).any(axis=1)
                 h = h[m]
             st.caption(f"{len(h):,} transaksi")
-            st.dataframe(h, use_container_width=True, hide_index=True, height=480)
+            sdf(h, use_container_width=True, hide_index=True, height=480)
             export_buttons(f"Riwayat_{jenis}", h, f"Riwayat Barang {jenis}", key="riw")
