@@ -134,12 +134,13 @@ section[data-testid="stSidebar"] {{ background:#DCE9FB; border-right:1px solid #
 .sb-user span {{ font-size:.66rem; color:#5b6f96; text-transform:uppercase; letter-spacing:.06rem; font-weight:700; }}
 .sb-label {{ font-size:.65rem; font-weight:800; text-transform:uppercase; letter-spacing:.1rem; color:#6a7ea6; margin:.6rem 0 .3rem .3rem; }}
 section[data-testid="stSidebar"] div[role="radiogroup"] {{ gap:.2rem; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label {{ padding:.7rem .9rem; border-radius:.6rem; width:100%; cursor:pointer; transition:.15s; margin:0; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {{ background:rgba(43,92,216,.10); }}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {{ display:none; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label p {{ font-weight:600; font-size:.93rem; color:{INK}; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {{ background:{C_PRIMARY}; box-shadow:0 3px 8px rgba(43,92,216,.35); }}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) p {{ color:#fff !important; }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label {{ padding:.7rem .9rem; border-radius:.6rem; width:100%; cursor:pointer; transition:.15s; margin:0; }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background:rgba(43,92,216,.10); }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child {{ display:none !important; }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label p {{ white-space:normal; line-height:1.25; }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label p {{ font-weight:600; font-size:.93rem; color:{INK}; }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {{ background:{C_PRIMARY}; box-shadow:0 3px 8px rgba(43,92,216,.35); }}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p {{ color:#fff !important; }}
 section[data-testid="stSidebar"] .stButton > button {{ background:#fff; border:1px solid #b9cdee; color:{C_DARK}; width:100%; border-radius:.6rem; font-weight:700; }}
 section[data-testid="stSidebar"] .stButton > button:hover {{ background:{C_PRIMARY}; color:#fff; border-color:{C_PRIMARY}; }}
 
@@ -588,7 +589,7 @@ with st.sidebar:
         flash("success", "Data diperbarui", "Data terbaru berhasil dimuat dari Google Sheets.")
         st.rerun()
     if st.button("🚪 Logout"):
-        st.session_state.update(logged_in=False, role=None, username="", menu=None)
+        st.session_state.update(logged_in=False, role=None, username="")
         st.rerun()
 
 page = pages[menu_label]
