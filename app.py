@@ -538,7 +538,7 @@ KATEGORI_LIST = [
 
 def clean_kategori(x) -> str:
     """Ambil nama kategorinya saja: buang awalan 'PART', tahun (2024 dst) dan ekstensi file."""
-    t = str(x or "").strip().upper()
+    t = str(x or "").strip().upper().replace("_", " ")
     t = re.sub(r"\.XLSX?$", "", t)
     t = re.sub(r"^PART\s+", "", t)
     t = re.sub(r"\s*(19|20)\d{2}\s*$", "", t)
@@ -563,6 +563,117 @@ def sdf(frame, **kw):
     kw.setdefault("hide_index", True)
     kw.setdefault("use_container_width", True)
     st.dataframe(data, **kw)
+
+
+# ---------------------------------------------------------
+# IMPORT MASTER DARI EXCEL / CSV
+# ---------------------------------------------------------
+STD_COLS = ["NO.PART", "SPAREPART", "TIPE MOBIL", "KATEGORI", "STOCK AWAL", "PRICELIST"]
+IMPORT_ALIASES = {
+    "NO.PART": {"NOPART", "PARTNO", "PARTNUMBER", "NOPARTNUMBER", "KODEPART"},
+    "SPAREPART": {"SPAREPART", "NAMAPART", "NAMABARANG", "NAMASPAREPART", "DESKRIPSI", "DESCRIPTION"},
+    "TIPE MOBIL": {"TIPEMOBIL", "TIPE", "MODEL", "TYPE", "MOBIL", "TYPEMODEL", "TIPEMODEL"},
+    "KATEGORI": {"KATEGORI", "KATEGORY", "CATEGORY"},
+    "STOCK AWAL": {"STOCKAWAL", "STOKAWAL", "SALDOAWAL", "STOCK", "STOK", "QTY"},
+    "PRICELIST": {"PRICELIST", "HARGA", "HARGAJUAL", "PRICE", "HARGAPART", "HARGAPL", "HARGAPRICELIST"},
+}
+
+
+def _norm(x) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(x).upper())
+
+
+def _map_headers(values) -> dict:
+    mapping = {}
+    # kolom STOCK AKHIR (termasuk salah ketik seperti "STOCK AKIRH") diutamakan
+    for idx, v in enumerate(values):
+        if re.match(r"^(STOCK|STOK)AK", _norm(v)):
+            mapping["STOCK AKHIR"] = idx
+            break
+    for std, alias in IMPORT_ALIASES.items():
+        for idx, v in enumerate(values):
+            if idx not in mapping.values() and _norm(v) in alias:
+                mapping[std] = idx
+                break
+    return mapping
+
+
+def to_int(v) -> int:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(round(v))
+    t = re.sub(r"[^\d,.\-]", "", str(v))
+    if not t or t in "-.,":
+        return 0
+    if "," in t and "." in t:
+        t = t.replace(".", "").replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", t):
+        t = t.replace(".", "")
+    elif re.fullmatch(r"-?\d{1,3}(,\d{3})+", t):
+        t = t.replace(",", "")
+    else:
+        t = t.replace(",", ".")
+    try:
+        return int(round(float(t)))
+    except ValueError:
+        return 0
+
+
+def _clean_cell(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip()
+
+
+def parse_upload(f):
+    """Baca satu file (xlsx/csv). Hanya STOCK AKHIR yang diambil (transaksi masuk/keluar diabaikan).
+    Return (DataFrame kolom STD_COLS, catatan). Kolom STOCK AWAL pada hasil = stok akhir dari file."""
+    name = f.name
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", name)
+    try:
+        if name.lower().endswith(".csv"):
+            try:
+                raw = pd.read_csv(f, header=None, dtype=object, sep=None, engine="python", encoding="utf-8")
+            except UnicodeDecodeError:
+                f.seek(0)
+                raw = pd.read_csv(f, header=None, dtype=object, sep=None, engine="python", encoding="latin-1")
+            sheets = {"csv": raw}
+        else:
+            sheets = pd.read_excel(f, sheet_name=None, header=None, dtype=object)
+    except Exception as e:
+        return None, f"Gagal membaca file: {e}"
+
+    cands = []
+    for sname, raw in sheets.items():
+        for i in range(min(20, len(raw))):
+            mp = _map_headers(list(raw.iloc[i].values))
+            if "NO.PART" in mp and "SPAREPART" in mp:
+                cands.append((sname, raw, i, mp))
+                break
+    if not cands:
+        return None, "Kolom NO.PART dan SPAREPART tidak ditemukan pada 20 baris pertama."
+
+    # pilih sheet yang punya kolom stok akhir (sheet MASUK/KELUAR otomatis terabaikan)
+    sname, raw, i, mp = next((c for c in cands if "STOCK AKHIR" in c[3]), cands[0])
+    stock_idx = mp.get("STOCK AKHIR", mp.get("STOCK AWAL"))
+    data = raw.iloc[i + 1:]
+    out = pd.DataFrame(index=range(len(data)))
+    for c in STD_COLS:
+        if c == "STOCK AWAL":
+            out[c] = data.iloc[:, stock_idx].reset_index(drop=True).map(to_int) if stock_idx is not None else 0
+        elif c in mp:
+            col = data.iloc[:, mp[c]].reset_index(drop=True)
+            out[c] = col.map(to_int) if c == "PRICELIST" else col.map(_clean_cell)
+        else:
+            out[c] = 0 if c == "PRICELIST" else ""
+    out["FILE"] = name
+    out["_STEM"] = stem
+    out = out[(out["NO.PART"] != "") & (out["SPAREPART"] != "")]
+    stok_hdr = _clean_cell(raw.iloc[i, stock_idx]) if stock_idx is not None else "-"
+    return out, f"{len(out)} baris dari sheet '{sname}' (stok diambil dari kolom '{stok_hdr}')"
 
 
 def load_stock():
@@ -883,7 +994,7 @@ elif page == "trx" and is_admin:
 # =========================================================
 elif page == "master" and is_admin:
     topbar("Master Sparepart", "🛠️")
-    tab_add, tab_edit, tab_del = st.tabs(["➕ Tambah Baru", "✏️ Edit Sparepart", "🗑️ Hapus Sparepart"])
+    tab_add, tab_imp, tab_edit, tab_del = st.tabs(["➕ Tambah Baru", "📤 Import Excel/CSV", "✏️ Edit Sparepart", "🗑️ Hapus Sparepart"])
     df_m = load_stock()
     has_data = not df_m.empty and "NO.PART" in df_m.columns
 
@@ -919,6 +1030,81 @@ elif page == "master" and is_admin:
                         st.rerun()
                     except Exception as e:
                         swal("error", "Gagal menambah sparepart", str(e))
+
+    with tab_imp:
+        with st.container(border=True):
+            st.markdown('<div class="panel-title">Import Master Sparepart dari Excel / CSV</div>', unsafe_allow_html=True)
+            st.caption("Upload satu atau banyak file sekaligus. Kolom dikenali otomatis dari judul kolomnya: "
+                       "NO.PART, SPAREPART, TIPE/MODEL, KATEGORI, STOCK AKHIR, HARGA PL. "
+                       "Sistem dimulai bersih: yang diambil hanya STOCK AKHIR sebagai stok awal di sistem baru. "
+                       "Data transaksi masuk/keluar di file lama diabaikan.")
+            tpl = pd.DataFrame([{"NO.PART": "12345-67890", "SPAREPART": "CONTOH BUMPER DEPAN", "TIPE MOBIL": "AVANZA",
+                                 "KATEGORI": "BUMPER", "STOCK AWAL": 2, "PRICELIST": 1500000}])
+            st.download_button("📗 Unduh Template Excel", to_excel({"Template": tpl}), "template_master_sparepart.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            files = st.file_uploader("Pilih file (.xlsx / .csv)", type=["xlsx", "csv"], accept_multiple_files=True, key="imp_files")
+            skip_zero = st.checkbox("Lewati part yang stok akhirnya 0", value=True)
+            use_fname = st.checkbox("Jika kolom KATEGORI kosong, ambil dari nama file (PART ACCU2024.xlsx → ACCU)", value=True)
+            default_kat = st.selectbox("Kategori cadangan (dipakai jika kategori masih kosong)",
+                                       kategori_options(df_m if has_data else None), index=None, placeholder="Opsional")
+
+            if files:
+                frames = []
+                for f in files:
+                    d, note = parse_upload(f)
+                    (st.success if d is not None else st.error)(f"**{f.name}** — {note}")
+                    if d is not None:
+                        frames.append(d)
+                if frames:
+                    imp = pd.concat(frames, ignore_index=True)
+                    imp["KATEGORI"] = imp["KATEGORI"].map(clean_kategori)
+                    if use_fname:
+                        blank = imp["KATEGORI"] == ""
+                        imp.loc[blank, "KATEGORI"] = imp.loc[blank, "_STEM"].map(clean_kategori)
+                    if default_kat:
+                        imp.loc[imp["KATEGORI"] == "", "KATEGORI"] = default_kat
+                    imp["NO.PART"] = imp["NO.PART"].str.strip()
+
+                    existing = set(df_m["NO.PART"].astype(str).str.strip().str.upper()) if has_data else set()
+                    key = imp["NO.PART"].str.upper()
+                    dup_file = key.duplicated(keep="first") & ~(skip_zero & (imp["STOCK AWAL"] <= 0))
+                    imp["STATUS"] = "BARU"
+                    imp.loc[imp["KATEGORI"] == "", "STATUS"] = "KATEGORI KOSONG"
+                    if skip_zero:
+                        imp.loc[imp["STOCK AWAL"] <= 0, "STATUS"] = "STOK 0"
+                    imp.loc[dup_file, "STATUS"] = "DUPLIKAT DI FILE"
+                    imp.loc[key.isin(existing), "STATUS"] = "SUDAH ADA"
+
+                    n_new = int((imp["STATUS"] == "BARU").sum())
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Total baris terbaca", num(len(imp)))
+                    m2.metric("Siap diimport (baru)", num(n_new))
+                    m3.metric("Dilewati", num(len(imp) - n_new))
+                    st.caption("Dilewati = stok 0, sudah ada di master, duplikat di file, atau kategori kosong.")
+                    sdf(imp[["STATUS", "NO.PART", "SPAREPART", "TIPE MOBIL", "KATEGORI", "STOCK AWAL", "PRICELIST", "FILE"]]
+                        .rename(columns={"STOCK AWAL": "STOK (dari file)"}), height=360)
+
+                    if n_new and st.button(f"🚀 Import {num(n_new)} data baru", type="primary"):
+                        rows = imp[imp["STATUS"] == "BARU"].to_dict("records")
+                        prog = st.progress(0.0, text="Mengirim data...")
+                        ok_n, fails = 0, []
+                        for i, r in enumerate(rows, start=1):
+                            try:
+                                post_payload({"action": "addNewPart", "no_part": r["NO.PART"], "sparepart": r["SPAREPART"],
+                                              "tipe_mobil": r["TIPE MOBIL"], "kategori": r["KATEGORI"],
+                                              "stock_awal": int(r["STOCK AWAL"]), "pricelist": int(r["PRICELIST"])})
+                                ok_n += 1
+                            except Exception as e:
+                                fails.append({"NO.PART": r["NO.PART"], "SPAREPART": r["SPAREPART"], "ALASAN": str(e)})
+                            prog.progress(i / len(rows), text=f"Mengirim {i} / {len(rows)}")
+                        st.cache_data.clear()
+                        if fails:
+                            swal("warning", "Import selesai sebagian", f"{ok_n} berhasil, {len(fails)} gagal.")
+                            st.warning(f"{ok_n} berhasil, {len(fails)} gagal:")
+                            sdf(pd.DataFrame(fails))
+                        else:
+                            swal("success", "Import berhasil!", f"{ok_n} sparepart ditambahkan ke master.")
+                            st.success(f"{ok_n} sparepart berhasil ditambahkan ke master.")
 
     with tab_edit:
         if not has_data:
