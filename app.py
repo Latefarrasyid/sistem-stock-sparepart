@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -448,7 +449,6 @@ def topbar(title: str, icon: str = ""):
     md(f"""<div class="topbar"><div><h1>{title}</h1>
         <div class="crumb">Sistem Stock Sparepart &nbsp;/&nbsp; {title}</div></div>
         <div class="tb-right"><span class="chip">📅 {now_wib():%d %b %Y, %H:%M} WIB</span>
-        <div class="bell">🔔<i></i></div>
         <div class="tb-user"><div class="av">{u[:1].upper()}</div>
         <div><b>{u}</b><small>{st.session_state.role}</small></div></div></div></div>""")
 
@@ -512,6 +512,37 @@ def movement_data() -> pd.DataFrame:
     out = pd.concat(frames, ignore_index=True)
     out["Waktu"] = pd.to_datetime(out["Waktu"], errors="coerce")
     return out
+
+
+KATEGORI_LIST = [
+    "ACCU", "AFFRONT", "AIR BAG", "AIR INLET", "BACKDOOR", "BAN", "BULKHEAD", "BUMPER", "CHASSIS", "CONDENSOR",
+    "COWL", "CROSSMEMBER", "EMBLEM", "ENGINE", "EXHAUST", "FENDER DAN QUARTER", "FILTER UDARA",
+    "FOG & COVER FOG LAMP", "FOOTSTEP", "HEAD LAMP", "INSTRUMENT & GOLVS", "INTERIOR LAMP", "INTERIOR TRIME",
+    "KACA", "KAKI-KAKI", "KAP MESIN", "LANTAI", "LINNER", "LIST PINTU", "MOUNTING", "MUDGUARD", "NHF & TPR",
+    "PILAR", "PINTU", "RADIATOR", "RAM & GRILLE", "REM", "ROOF & SIDE ROOF", "SPEEDOMETER", "SPION",
+    "STEERING SISTEM", "STOP LAMP", "TALANG AIR", "TAPE DAN RADIO", "TOOLSET", "TRANSMISI & KOPLING",
+    "TRISPLANG", "VELG", "WIPER", "WIREHARNESS",
+]
+
+
+def clean_kategori(x) -> str:
+    """Ambil nama kategorinya saja: buang awalan 'PART', tahun (2024 dst) dan ekstensi file."""
+    t = str(x or "").strip().upper()
+    t = re.sub(r"\.XLSX?$", "", t)
+    t = re.sub(r"^PART\s+", "", t)
+    t = re.sub(r"\s*(19|20)\d{2}\s*$", "", t)
+    return t.strip()
+
+
+def kategori_options(df=None) -> list:
+    """Daftar tetap + kategori lain yang sudah ada di sheet (jika ada yang belum masuk daftar)."""
+    opts = list(KATEGORI_LIST)
+    if df is not None and not df.empty and "KATEGORI" in df.columns:
+        for v in df["KATEGORI"].dropna().unique():
+            c = clean_kategori(v)
+            if c and c not in opts:
+                opts.append(c)
+    return sorted(opts)
 
 
 def load_stock():
@@ -840,7 +871,7 @@ elif page == "master" and is_admin:
         prefill = st.session_state.pop("prefill_no_part", "")
         if prefill:
             st.info(f"No. Part **{prefill}** belum ada di master. Lengkapi datanya di bawah.")
-        kat_exist = sorted({str(x) for x in df_m.get("KATEGORI", pd.Series(dtype=str)).dropna() if str(x).strip()}) if has_data else []
+        kat_opts = kategori_options(df_m if has_data else None)
         with st.container(border=True):
             with st.form("form_master_add", clear_on_submit=True):
                 c1, c2 = st.columns(2)
@@ -848,14 +879,14 @@ elif page == "master" and is_admin:
                 sparepart = c2.text_input("SPAREPART *").strip()
                 c3, c4 = st.columns(2)
                 tipe = c3.text_input("TIPE MOBIL").strip()
-                kategori = c4.text_input("KATEGORI", help="Kategori yang sudah ada: " + (", ".join(kat_exist) or "-")).strip()
+                kategori = c4.selectbox("KATEGORI *", kat_opts, index=None, placeholder="Pilih / ketik untuk mencari kategori")
                 c5, c6 = st.columns(2)
                 s_awal = c5.number_input("STOCK AWAL", min_value=0, step=1, value=0)
                 price = c6.number_input("PRICELIST", min_value=0, step=500, value=0)
                 ok = st.form_submit_button("💾 Simpan Sparepart Baru", type="primary", use_container_width=True)
             if ok:
-                if not no_part or not sparepart:
-                    swal("warning", "Data belum lengkap", "NO.PART dan SPAREPART wajib diisi.")
+                if not no_part or not sparepart or not kategori:
+                    swal("warning", "Data belum lengkap", "NO.PART, SPAREPART, dan KATEGORI wajib diisi.")
                 elif has_data and no_part.upper() in df_m["NO.PART"].astype(str).str.strip().str.upper().values:
                     swal("warning", "No. Part sudah ada", f"{no_part} sudah terdaftar di master.")
                 else:
@@ -887,20 +918,23 @@ elif page == "master" and is_admin:
                 else:
                     r = hit.iloc[0]
                     old = str(r["NO.PART"])
+                    cur_kat = clean_kategori(r.get("KATEGORI", ""))
+                    kat_opts_e = kategori_options(df_m)
+                    kat_idx = kat_opts_e.index(cur_kat) if cur_kat in kat_opts_e else None
                     with st.form("form_master_edit"):
                         e1, e2 = st.columns(2)
                         n_no = e1.text_input("NO.PART *", value=old).strip()
                         n_sp = e2.text_input("SPAREPART *", value=str(r.get("SPAREPART", ""))).strip()
                         e3, e4 = st.columns(2)
                         n_tp = e3.text_input("TIPE MOBIL", value=str(r.get("TIPE MOBIL", ""))).strip()
-                        n_kt = e4.text_input("KATEGORI", value=str(r.get("KATEGORI", ""))).strip()
+                        n_kt = e4.selectbox("KATEGORI *", kat_opts_e, index=kat_idx, placeholder="Pilih kategori")
                         e5, e6 = st.columns(2)
                         n_sa = e5.number_input("STOCK AWAL", min_value=0, step=1, value=int(r.get("STOCK AWAL", 0)))
                         n_pl = e6.number_input("PRICELIST", min_value=0, step=500, value=int(r.get("PRICELIST", 0)))
                         ok = st.form_submit_button("💾 Simpan Perubahan", type="primary", use_container_width=True)
                     if ok:
-                        if not n_no or not n_sp:
-                            swal("warning", "Data belum lengkap", "NO.PART dan SPAREPART wajib diisi.")
+                        if not n_no or not n_sp or not n_kt:
+                            swal("warning", "Data belum lengkap", "NO.PART, SPAREPART, dan KATEGORI wajib diisi.")
                         else:
                             try:
                                 res = post_payload({"action": "updatePart", "old_no_part": old, "no_part": n_no,
