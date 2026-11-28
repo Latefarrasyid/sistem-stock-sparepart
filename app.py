@@ -444,13 +444,13 @@ def to_pdf(title: str, frame: pd.DataFrame, money_cols=(), int_cols=(), total_ro
     return buf.getvalue()
 
 
-def export_buttons(label: str, frame: pd.DataFrame, title: str, money_cols=(), int_cols=(), total_row=None, key=""):
+def export_buttons(label: str, frame: pd.DataFrame, title: str, money_cols=(), int_cols=(), total_row=None, key="", subtitle=""):
     stamp = now_wib().strftime("%Y%m%d_%H%M")
     c1, c2, _ = st.columns([1, 1, 3])
     c1.download_button("📗 Cetak Excel", to_excel({label: frame}), f"{label}_{stamp}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        use_container_width=True, key=f"x_{key}")
-    c2.download_button("📕 Cetak PDF", to_pdf(title, frame, money_cols, int_cols, total_row), f"{label}_{stamp}.pdf",
+    c2.download_button("📕 Cetak PDF", to_pdf(title, frame, money_cols, int_cols, total_row, subtitle), f"{label}_{stamp}.pdf",
                        "application/pdf", use_container_width=True, key=f"p_{key}")
 
 
@@ -781,6 +781,25 @@ def parse_trx_file(f):
     out["TANGGAL"] = pd.to_datetime(out["TANGGAL"], errors="coerce")
     out.insert(0, "JENIS", jenis)
     return out, f"{len(out)} baris part dari {n_sheet} sheet" + (f" · terdeteksi {jenis}" if jenis else " · jenis tidak terdeteksi")
+
+
+def parse_dt(series: pd.Series) -> pd.Series:
+    """Parse kolom tanggal dari riwayat. Format ISO UTC (…T…Z) dikonversi ke WIB."""
+    txt = series.astype(str)
+    iso = txt.str.contains(r"^\d{4}-\d{2}-\d{2}T.*Z$", regex=True)
+    base = series.where(~iso)
+    def _p(v):
+        if pd.isna(v):
+            return pd.NaT
+        if isinstance(v, str) and re.match(r"^\d{4}-\d{1,2}-\d{1,2}", v.strip()):
+            return pd.to_datetime(v, errors="coerce")  # ISO: tahun-bulan-hari
+        return pd.to_datetime(v, errors="coerce", dayfirst=True)  # 05/11/2026 = 5 November
+
+    out = pd.to_datetime(base.map(_p), errors="coerce")
+    if iso.any():
+        z = pd.to_datetime(series.where(iso), errors="coerce", utc=True).dt.tz_convert("Asia/Jakarta").dt.tz_localize(None)
+        out = out.fillna(z)
+    return out
 
 
 def load_stock():
@@ -1464,10 +1483,72 @@ elif page == "riwayat":
         if h.empty:
             st.info(f"Belum ada data pada tab `{jenis}`.")
         else:
-            cari = st.text_input("🔍 Cari di riwayat")
+            h = h.copy()
+            dcol = _pick(h.columns, ("TGL", "TANGGAL", "DATE", "WAKTU"))
+            qcol = _pick(h.columns, exact=("QTY", "JUMLAH"))
+            periode, suffix = "Semua periode", ""
+
+            if dcol:
+                h["_dt"] = parse_dt(h[dcol])
+                today = now_wib().date()
+                preset = st.radio("📅 Periode", ["Semua", "Hari ini", "7 hari terakhir", "Bulan ini", "Bulan lalu", "Pilih tanggal"],
+                                  horizontal=True)
+                rng = None
+                if preset == "Hari ini":
+                    rng = (today, today)
+                elif preset == "7 hari terakhir":
+                    rng = (today - timedelta(days=6), today)
+                elif preset == "Bulan ini":
+                    rng = (today.replace(day=1), today)
+                elif preset == "Bulan lalu":
+                    last = today.replace(day=1) - timedelta(days=1)
+                    rng = (last.replace(day=1), last)
+                elif preset == "Pilih tanggal":
+                    c1, c2 = st.columns(2)
+                    a = c1.date_input("Dari tanggal", value=today.replace(day=1), format="DD/MM/YYYY", key="riw_a")
+                    b = c2.date_input("Sampai tanggal", value=today, format="DD/MM/YYYY", key="riw_b")
+                    rng = (a, b)
+                if rng:
+                    if rng[0] > rng[1]:
+                        st.error("Tanggal awal tidak boleh lebih besar dari tanggal akhir.")
+                        st.stop()
+                    h = h[h["_dt"].notna() & (h["_dt"] >= pd.Timestamp(rng[0]))
+                          & (h["_dt"] < pd.Timestamp(rng[1]) + pd.Timedelta(days=1))]
+                    periode = f"Periode {rng[0]:%d/%m/%Y} s/d {rng[1]:%d/%m/%Y}."
+                    suffix = f"_{rng[0]:%d%m%Y}-{rng[1]:%d%m%Y}"
+                h = h.sort_values("_dt", ascending=False, na_position="last")
+                has_time = ((h["_dt"].dt.hour.fillna(0) + h["_dt"].dt.minute.fillna(0)) > 0).any()
+                h[dcol] = h["_dt"].dt.strftime("%d/%m/%Y %H:%M" if has_time else "%d/%m/%Y").fillna("")
+                h = h.drop(columns="_dt")
+            else:
+                st.caption("Kolom tanggal tidak ditemukan di sheet riwayat, jadi filter tanggal tidak tersedia.")
+
+            cari = st.text_input("🔍 Cari di riwayat (plat nomor, asuransi, sparepart, no. part, dll)")
             if cari:
                 m = h.astype(str).apply(lambda c: c.str.contains(cari, case=False, na=False)).any(axis=1)
                 h = h[m]
-            st.caption(f"{len(h):,} transaksi")
+
+            if qcol:
+                h[qcol] = pd.to_numeric(h[qcol], errors="coerce").fillna(0)
+            mcols = tuple(c for c in h.columns if str(c).upper() in MONEY_COLS)
+            for c in mcols:
+                h[c] = pd.to_numeric(h[c], errors="coerce").fillna(0)
+
+            cards = [(f"Jumlah Transaksi {jenis.title()}", num(len(h)), "🧾", C_PRIMARY)]
+            if qcol:
+                cards.append((f"Total Qty {jenis.title()}", num(h[qcol].sum()), "📦", C_SUCCESS))
+            if mcols:
+                cards.append((f"Total {mcols[0].title()}", rp(h[mcols[0]].sum()), "💰", C_INFO))
+            kpi_cards(cards)
+
+            st.caption(f"{len(h):,} transaksi · {periode}")
             sdf(h, use_container_width=True, hide_index=True, height=480)
-            export_buttons(f"Riwayat_{jenis}", h, f"Riwayat Barang {jenis}", key="riw")
+            total = {}
+            if len(h):
+                total[h.columns[0]] = "TOTAL"
+                if qcol:
+                    total[qcol] = h[qcol].sum()
+                if mcols:
+                    total[mcols[0]] = h[mcols[0]].sum()
+            export_buttons(f"Riwayat_{jenis}{suffix}", h, f"Laporan Riwayat Barang {jenis}", money_cols=mcols,
+                           int_cols=(qcol,) if qcol else (), total_row=total or None, key="riw", subtitle=periode)
