@@ -2,7 +2,7 @@ import io
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import html as _html
@@ -71,6 +71,8 @@ VIEWER_USER = get_secret("VIEWER_USER", "user")
 VIEWER_PASS = get_secret("VIEWER_PASS", "user123")
 
 KRITIS_MAX = 2
+# Stok di sistem = stok akhir Oktober 2026, jadi transaksi yang diimport hanya yang SETELAH tanggal ini
+STOK_CUTOFF = date(2026, 11, 1)
 NUM_COLS = ["STOCK AWAL", "KELUAR", "MASUK", "PRICELIST", "NOMINAL TOTAL", "STOCK AKHIR"]
 
 # Palet warna ala SB Admin 2
@@ -88,7 +90,7 @@ def now_wib() -> datetime:
     return datetime.utcnow() + timedelta(hours=7)
 
 
-MONEY_COLS = ("PRICELIST", "NOMINAL TOTAL", "NOMINAL")
+MONEY_COLS = ("PRICELIST", "NOMINAL TOTAL", "NOMINAL", "HARGA")
 
 
 def rp(x) -> str:
@@ -676,9 +678,117 @@ def parse_upload(f):
     return out, f"{len(out)} baris dari sheet '{sname}' (stok diambil dari kolom '{stok_hdr}')"
 
 
+# ---------------------------------------------------------
+# IMPORT TRANSAKSI MASUK / KELUAR DARI EXCEL
+# ---------------------------------------------------------
+TRX_ALIASES = {
+    "NO": {"NO"},
+    "TANGGAL": {"TANGGAL", "TGL", "DATE"},
+    "ASURANSI": {"ASURANSI", "INSURANCE"},
+    "MEREK": {"MEREK", "TIPEMOBIL", "MODEL", "TYPE", "MOBIL"},
+    "PLAT": {"PLATNOMOR", "NOPOL", "PLAT", "NOPLAT", "PLATNO"},
+    "SPAREPART": {"SPAREPART", "NAMAPART", "NAMABARANG"},
+    "NO.PART": {"NOMORPART", "NOPART", "PARTNO", "PARTNUMBER", "NOPARTNUMBER"},
+    "HARGA": {"HARGA", "PRICE", "PRICELIST", "HARGAPART"},
+    "QTY": {"QTY", "JUMLAH", "JML"},
+}
+
+CAT_KEYWORDS = [
+    ("AIR BAG", "AIR BAG"), ("AIRBAG", "AIR BAG"), ("HEAD LAMP", "HEAD LAMP"), ("HEADLAMP", "HEAD LAMP"),
+    ("STOP LAMP", "STOP LAMP"), ("FOG LAMP", "FOG & COVER FOG LAMP"), ("INTERIOR LAMP", "INTERIOR LAMP"),
+    ("BUMPER", "BUMPER"), ("GRILLE", "RAM & GRILLE"), ("GRILE", "RAM & GRILLE"), ("SPION", "SPION"),
+    ("VELG", "VELG"), ("KAP MESIN", "KAP MESIN"), ("BACKDOOR", "BACKDOOR"), ("BAKDOOR", "BACKDOOR"),
+    ("LIST PINTU", "LIST PINTU"), ("PINTU", "PINTU"), ("FENDER", "FENDER DAN QUARTER"),
+    ("QUARTER", "FENDER DAN QUARTER"), ("RADIATOR", "RADIATOR"), ("CONDENSOR", "CONDENSOR"),
+    ("KACA", "KACA"), ("EMBLEM", "EMBLEM"), ("SHOCK", "KAKI-KAKI"), ("WIPER", "WIPER"), ("ACCU", "ACCU"),
+    ("AFRONT", "AFFRONT"), ("AFFRONT", "AFFRONT"), ("MUDGUARD", "MUDGUARD"), ("LINNER", "LINNER"),
+    ("TRISPLANG", "TRISPLANG"), ("TISLANG", "TRISPLANG"), ("INTERCOOLER", "ENGINE"), ("INTAKE", "ENGINE"),
+    ("TURBO", "ENGINE"), ("PILAR", "PILAR"), ("COWL", "COWL"),
+]
+
+
+def guess_kategori(name):
+    """Tebakan kategori dari nama sparepart (bisa diubah user). Return None jika tidak yakin."""
+    u = str(name).upper()
+    for key, cat in CAT_KEYWORDS:
+        if key in u:
+            return cat
+    return None
+
+
+def _map_trx(values) -> dict:
+    mp = {}
+    for std, alias in TRX_ALIASES.items():
+        for idx, v in enumerate(values):
+            if idx not in mp.values() and _norm(v) in alias:
+                mp[std] = idx
+                break
+    return mp
+
+
+def _to_date(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return pd.NaT
+    return pd.to_datetime(v, errors="coerce", dayfirst=True)
+
+
+def parse_trx_file(f):
+    """Baca file transaksi (banyak sheet per bulan). Baris lanjutan (tanpa NO.) mewarisi
+    tanggal/asuransi/merek/plat dari baris transaksi di atasnya. Return (DataFrame, catatan)."""
+    name = f.name
+    try:
+        sheets = pd.read_excel(f, sheet_name=None, header=None, dtype=object)
+    except Exception as e:
+        return None, f"Gagal membaca file: {e}"
+    u = name.upper()
+    jenis = "KELUAR" if "KELUAR" in u else "MASUK" if "MASUK" in u else ""
+    rows, n_sheet = [], 0
+    for sname, raw in sheets.items():
+        if not jenis and raw.shape[0] and raw.shape[1]:
+            title = str(raw.iloc[0, 0]).upper()
+            jenis = "KELUAR" if "KELUAR" in title else "MASUK" if "MASUK" in title else ""
+        hdr = None
+        for i in range(min(10, len(raw))):
+            mp = _map_trx(list(raw.iloc[i].values))
+            if "SPAREPART" in mp and "NO.PART" in mp:
+                hdr = (i, mp)
+                break
+        if hdr is None:
+            continue
+        n_sheet += 1
+        i, mp = hdr
+        cur = {"TANGGAL": pd.NaT, "ASURANSI": "", "MEREK": "", "PLAT": ""}
+        for vals in raw.iloc[i + 1:].itertuples(index=False, name=None):
+            get = lambda k: vals[mp[k]] if k in mp else None
+            no = _clean_cell(get("NO"))
+            if no.upper().startswith("TOTAL"):
+                continue
+            if no != "":
+                cur = {"TANGGAL": _to_date(get("TANGGAL")), "ASURANSI": _clean_cell(get("ASURANSI")),
+                       "MEREK": _clean_cell(get("MEREK")), "PLAT": _clean_cell(get("PLAT"))}
+            sp = _clean_cell(get("SPAREPART"))
+            if sp == "":
+                continue
+            m = re.search(r"[@(]\s*(\d+)\s*PCS", sp.upper())
+            qty = int(m.group(1)) if m else 1
+            if "QTY" in mp:
+                qty = max(to_int(get("QTY")), 1)
+            rows.append({**cur, "SPAREPART": sp, "NO.PART": _clean_cell(get("NO.PART")), "QTY": qty,
+                         "HARGA": to_int(get("HARGA")), "SHEET": sname, "FILE": name})
+    if not rows:
+        return None, "Kolom SPARE PART dan NOMOR PART tidak ditemukan di sheet manapun."
+    out = pd.DataFrame(rows)
+    out["TANGGAL"] = pd.to_datetime(out["TANGGAL"], errors="coerce")
+    out.insert(0, "JENIS", jenis)
+    return out, f"{len(out)} baris part dari {n_sheet} sheet" + (f" · terdeteksi {jenis}" if jenis else " · jenis tidak terdeteksi")
+
+
 def load_stock():
     try:
-        return fetch_stock()
+        d = fetch_stock().copy()
+        if "KATEGORI" in d.columns:
+            d["KATEGORI"] = d["KATEGORI"].map(clean_kategori)
+        return d
     except Exception as e:
         swal("error", "Gagal memuat data", str(e))
         st.error(f"Error memuat stok: {e}")
@@ -695,10 +805,11 @@ PAGES_ALL = {
     "📦  Data Stok": "stok",
     "🗂️  Stok per Kategori": "kategori",
     "📥  Barang Masuk / Keluar": "trx",
+    "📑  Import Transaksi": "imptrx",
     "🛠️  Master Sparepart": "master",
     "🕘  Riwayat Transaksi": "riwayat",
 }
-ADMIN_ONLY = {"trx", "master"}
+ADMIN_ONLY = {"trx", "imptrx", "master"}
 pages = {k: v for k, v in PAGES_ALL.items() if is_admin or v not in ADMIN_ONLY}
 
 if st.session_state.get("menu") not in pages:
@@ -871,6 +982,12 @@ elif page == "stok":
         if kritis and "STOCK AKHIR" in v.columns:
             v = v[v["STOCK AKHIR"] <= KRITIS_MAX]
 
+        judul = f" · {_html.escape(kat)}" if kat != "Semua" else ""
+        kpi_cards([
+            (f"Jumlah Item{judul}", num(len(v)), "🔩", C_PRIMARY),
+            ("Total Stok Akhir", num(v["STOCK AKHIR"].sum()) if "STOCK AKHIR" in v.columns else "0", "📦", C_SUCCESS),
+            ("Total Nominal", rp(v["NOMINAL TOTAL"].sum()) if "NOMINAL TOTAL" in v.columns else "Rp 0", "💰", C_INFO),
+        ])
         st.caption(f"Menampilkan {len(v):,} dari {len(df):,} item")
         sdf(v, use_container_width=True, hide_index=True, height=480)
         tot = {}
@@ -988,6 +1105,156 @@ elif page == "trx" and is_admin:
                             st.rerun()
                         except Exception as e:
                             swal("error", "Gagal menyimpan", str(e))
+
+# =========================================================
+# 4b. IMPORT TRANSAKSI MASUK / KELUAR (ADMIN)
+# =========================================================
+elif page == "imptrx" and is_admin:
+    topbar("Import Transaksi Masuk / Keluar", "📑")
+    df = load_stock()
+    master = {}
+    if not df.empty and "NO.PART" in df.columns:
+        for _, r in df.iterrows():
+            master.setdefault(_norm(r["NO.PART"]), (str(r["NO.PART"]), str(r.get("SPAREPART", "")), int(r.get("STOCK AKHIR", 0))))
+
+    st.warning(f"Stok di sistem dimulai dari stok akhir Oktober 2026. Agar stok tidak terhitung ganda, "
+               f"hanya transaksi **mulai {STOK_CUTOFF:%d-%m-%Y}** yang diimport secara default (bisa diubah di bawah).")
+
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">1. Upload file Excel transaksi</div>', unsafe_allow_html=True)
+        st.caption("Bisa upload file MASUK dan KELUAR sekaligus. Semua sheet bulanan dibaca otomatis. "
+                   "Keterangan transaksi diisi otomatis dari PLAT NOMOR dan ASURANSI.")
+        files = st.file_uploader("Pilih file (.xlsx)", type=["xlsx"], accept_multiple_files=True, key="trx_files")
+        c1, c2, c3 = st.columns(3)
+        jenis_opt = c1.radio("Jenis transaksi", ["Otomatis", "MASUK", "KELUAR"], horizontal=True,
+                             help="Otomatis = dari nama file / judul sheet")
+        dari = c2.date_input("Dari tanggal", value=STOK_CUTOFF, format="DD/MM/YYYY")
+        sampai = c3.date_input("Sampai tanggal", value=now_wib().date(), format="DD/MM/YYYY")
+        o1, o2 = st.columns(2)
+        incl_nodate = o1.checkbox("Sertakan baris tanpa tanggal", value=False)
+        cek_stok = o2.checkbox("Tolak KELUAR jika stok tidak cukup", value=True)
+
+    if files:
+        frames = []
+        for f in files:
+            d, note = parse_trx_file(f)
+            (st.success if d is not None else st.error)(f"**{f.name}** — {note}")
+            if d is not None:
+                frames.append(d)
+        if frames:
+            trx = pd.concat(frames, ignore_index=True)
+            if jenis_opt != "Otomatis":
+                trx["JENIS"] = jenis_opt
+            if (trx["JENIS"] == "").any():
+                st.error("Jenis (MASUK/KELUAR) tidak terdeteksi untuk sebagian file. Pilih jenisnya manual di atas.")
+                st.stop()
+
+            trx["KEY"] = trx["NO.PART"].map(_norm)
+            in_range = trx["TANGGAL"].notna() & (trx["TANGGAL"] >= pd.Timestamp(dari)) & (trx["TANGGAL"] <= pd.Timestamp(sampai))
+            trx["STATUS"] = "SIAP"
+            trx.loc[trx["KEY"] == "", "STATUS"] = "NO.PART KOSONG"
+            trx.loc[(trx["STATUS"] == "SIAP") & ~trx["KEY"].isin(master.keys()), "STATUS"] = "BELUM ADA DI MASTER"
+            if incl_nodate:
+                trx.loc[trx["TANGGAL"].notna() & ~in_range, "STATUS"] = "DI LUAR TANGGAL"
+            else:
+                trx.loc[~in_range & trx["TANGGAL"].notna(), "STATUS"] = "DI LUAR TANGGAL"
+                trx.loc[trx["TANGGAL"].isna(), "STATUS"] = "TANPA TANGGAL"
+
+            # ---- 2. part belum ada di master ----
+            unk_rows = trx[trx["STATUS"] == "BELUM ADA DI MASTER"].drop_duplicates("KEY")
+            if not unk_rows.empty:
+                with st.container(border=True):
+                    st.markdown(f'<div class="panel-title">2. Part belum ada di Master ({len(unk_rows)} part)</div>',
+                                unsafe_allow_html=True)
+                    st.caption("Lengkapi KATEGORI (sudah ditebak otomatis dari nama part, silakan koreksi), "
+                               "lalu tambahkan ke Master. Stok awal part baru = 0.")
+                    unk = pd.DataFrame({
+                        "NO.PART": unk_rows["NO.PART"].values,
+                        "SPAREPART": unk_rows["SPAREPART"].values,
+                        "TIPE MOBIL": unk_rows["MEREK"].values,
+                        "KATEGORI": [guess_kategori(x) for x in unk_rows["SPAREPART"]],
+                        "PRICELIST": unk_rows["HARGA"].values,
+                    })
+                    edited = st.data_editor(
+                        unk, hide_index=True, use_container_width=True, key="unk_editor", disabled=["NO.PART"],
+                        column_config={
+                            "KATEGORI": st.column_config.SelectboxColumn("KATEGORI", options=kategori_options(df), required=True),
+                            "PRICELIST": st.column_config.NumberColumn("PRICELIST", format="%d", min_value=0),
+                        })
+                    if st.button(f"➕ Tambahkan {len(edited)} part ke Master", type="primary", key="add_unk"):
+                        if edited["KATEGORI"].isna().any() or (edited["KATEGORI"] == "").any():
+                            swal("warning", "Kategori belum lengkap", "Pilih KATEGORI untuk semua part dulu.")
+                        else:
+                            prog = st.progress(0.0, text="Menambahkan ke master...")
+                            ok_n, fails = 0, []
+                            recs = edited.to_dict("records")
+                            for i, r in enumerate(recs, start=1):
+                                try:
+                                    post_payload({"action": "addNewPart", "no_part": r["NO.PART"], "sparepart": r["SPAREPART"],
+                                                  "tipe_mobil": r["TIPE MOBIL"], "kategori": r["KATEGORI"],
+                                                  "stock_awal": 0, "pricelist": int(r["PRICELIST"] or 0)})
+                                    ok_n += 1
+                                except Exception as e:
+                                    fails.append({"NO.PART": r["NO.PART"], "ALASAN": str(e)})
+                                prog.progress(i / len(recs), text=f"{i} / {len(recs)}")
+                            st.cache_data.clear()
+                            if fails:
+                                st.warning(f"{ok_n} berhasil, {len(fails)} gagal:")
+                                sdf(pd.DataFrame(fails))
+                            else:
+                                flash("success", "Master diperbarui", f"{ok_n} part baru ditambahkan. Silakan lanjut import transaksi.")
+                                st.rerun()
+
+            # ---- cek stok berjalan untuk KELUAR ----
+            run = {k: v[2] for k, v in master.items()}
+            order = trx[trx["STATUS"] == "SIAP"].assign(_o=lambda d: (d["JENIS"] == "KELUAR").astype(int)) \
+                .sort_values(["TANGGAL", "_o"], kind="stable")
+            for idx, r in order.iterrows():
+                if r["JENIS"] == "MASUK":
+                    run[r["KEY"]] = run.get(r["KEY"], 0) + int(r["QTY"])
+                else:
+                    if cek_stok and int(r["QTY"]) > run.get(r["KEY"], 0):
+                        trx.loc[idx, "STATUS"] = "STOK KURANG"
+                    else:
+                        run[r["KEY"]] = run.get(r["KEY"], 0) - int(r["QTY"])
+
+            # ---- 3. pratinjau & import ----
+            n_ok = int((trx["STATUS"] == "SIAP").sum())
+            with st.container(border=True):
+                st.markdown('<div class="panel-title">3. Pratinjau & Import</div>', unsafe_allow_html=True)
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total baris", num(len(trx)))
+                m2.metric("Siap diimport", num(n_ok))
+                m3.metric("Belum ada di master", num(int((trx["STATUS"] == "BELUM ADA DI MASTER").sum())))
+                m4.metric("Dilewati lainnya", num(len(trx) - n_ok - int((trx["STATUS"] == "BELUM ADA DI MASTER").sum())))
+                st.caption("Dilewati: di luar rentang tanggal, tanpa tanggal, NO.PART kosong, atau stok tidak cukup.")
+                show = trx.copy()
+                show["TANGGAL"] = show["TANGGAL"].dt.strftime("%d/%m/%Y").fillna("-")
+                sdf(show[["STATUS", "JENIS", "TANGGAL", "PLAT", "ASURANSI", "SPAREPART", "NO.PART", "QTY", "HARGA", "SHEET"]],
+                    height=380)
+                if n_ok and st.button(f"🚀 Import {num(n_ok)} transaksi", type="primary", key="go_trx"):
+                    rows = trx[trx["STATUS"] == "SIAP"].sort_values("TANGGAL", kind="stable").to_dict("records")
+                    prog = st.progress(0.0, text="Mengirim transaksi...")
+                    ok_n, fails = 0, []
+                    for i, r in enumerate(rows, start=1):
+                        m_no, m_name, _ = master[r["KEY"]]
+                        ket = " | ".join([x for x in [r["PLAT"], r["ASURANSI"]] if x])
+                        try:
+                            post_payload({"action": "addTransaction", "type": r["JENIS"], "no_part": m_no,
+                                          "sparepart": m_name, "qty": int(r["QTY"]), "keterangan": ket,
+                                          "tanggal": r["TANGGAL"].strftime("%Y-%m-%d")})
+                            ok_n += 1
+                        except Exception as e:
+                            fails.append({"NO.PART": m_no, "JENIS": r["JENIS"], "ALASAN": str(e)})
+                        prog.progress(i / len(rows), text=f"Mengirim {i} / {len(rows)}")
+                    st.cache_data.clear()
+                    if fails:
+                        swal("warning", "Import selesai sebagian", f"{ok_n} berhasil, {len(fails)} gagal.")
+                        st.warning(f"{ok_n} berhasil, {len(fails)} gagal:")
+                        sdf(pd.DataFrame(fails))
+                    else:
+                        swal("success", "Import berhasil!", f"{ok_n} transaksi tersimpan.")
+                        st.success(f"{ok_n} transaksi berhasil diimport.")
 
 # =========================================================
 # 5. MASTER SPAREPART (ADMIN)
